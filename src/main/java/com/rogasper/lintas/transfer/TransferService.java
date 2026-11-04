@@ -1,0 +1,123 @@
+package com.rogasper.lintas.transfer;
+
+import com.rogasper.lintas.ledger.LedgerService;
+import com.rogasper.lintas.partner.PartnerClient;
+import com.rogasper.lintas.shared.Currency;
+import com.rogasper.lintas.shared.Money;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
+
+/**
+ * Quote + transfer orchestration.
+ *
+ * <p>Already implemented: quote pricing. Left for you: everything that can fail halfway —
+ * executing against a partner, and staying correct when the same request arrives twice.
+ */
+@Service
+public class TransferService {
+
+    private final QuoteRepository quotes;
+    private final TransferRepository transfers;
+    private final LedgerService ledger;
+    private final PartnerClient partner;
+    private final Clock clock;
+
+    public TransferService(
+            QuoteRepository quotes,
+            TransferRepository transfers,
+            LedgerService ledger,
+            PartnerClient partner,
+            Clock clock) {
+        this.quotes = quotes;
+        this.transfers = transfers;
+        this.ledger = ledger;
+        this.partner = partner;
+        this.clock = clock;
+    }
+
+    /**
+     * Prices a quote. {@code targetAmount = sourceAmount * rate}, rounded HALF_UP to the target
+     * currency's scale (that rounding is a business decision — keep it, and keep it tested).
+     */
+    public Quote createQuote(
+            String customerRef,
+            Money sourceAmount,
+            Currency targetCurrency,
+            BigDecimal rate,
+            Money fee,
+            Duration ttl) {
+
+        Instant now = clock.instant();
+        if (!sourceAmount.isPositive()) {
+            throw new IllegalArgumentException("source amount must be positive: " + sourceAmount);
+        }
+        if (fee.isNegative()) {
+            throw new IllegalArgumentException("fee must not be negative: " + fee);
+        }
+        if (fee.currency() != sourceAmount.currency()) {
+            throw new IllegalArgumentException("fee must be charged in the source currency");
+        }
+        if (rate == null || rate.signum() <= 0) {
+            throw new IllegalArgumentException("rate must be positive");
+        }
+        if (ttl == null || ttl.isNegative() || ttl.isZero()) {
+            throw new IllegalArgumentException("quote ttl must be positive");
+        }
+
+        Money targetAmount = Money.ofMajor(
+                sourceAmount.toMajor().multiply(rate).setScale(targetCurrency.scale(), RoundingMode.HALF_UP),
+                targetCurrency);
+
+        Quote quote = new Quote(
+                "Q-" + UUID.randomUUID().toString().substring(0, 8),
+                customerRef,
+                sourceAmount,
+                targetAmount,
+                rate,
+                fee,
+                now,
+                now.plus(ttl));
+        return quotes.save(quote);
+    }
+
+    /**
+     * Starts (or resumes) a transfer for a quote.
+     *
+     * <p>Must satisfy, in this order:
+     * <ol>
+     *   <li>same {@code idempotencyKey} twice returns the same transfer and moves money once;</li>
+     *   <li>an expired quote is refused with {@link QuoteExpiredException};</li>
+     *   <li>a partner timeout raises {@link PartnerTimeoutException} and leaves the transfer
+     *       {@code PENDING_PARTNER} — calling {@code execute} again with the same key resumes it
+     *       instead of creating a second transfer;</li>
+     *   <li>a permanent partner rejection ends in {@code REFUNDED} with the customer's ledger
+     *       balance back to where it started.</li>
+     * </ol>
+     */
+    public Transfer execute(String idempotencyKey, String quoteId) {
+        throw new UnsupportedOperationException(
+                "TODO drill 5-10: implement TransferService.execute (idempotency, expiry, partner call, refund)");
+    }
+
+    /** Cancels a transfer that has not reached the partner yet. */
+    public Transfer cancel(String transferId) {
+        throw new UnsupportedOperationException(
+                "TODO: implement TransferService.cancel — only legal before the partner accepts");
+    }
+
+    public Optional<Transfer> find(String transferId) {
+        return transfers.findById(transferId);
+    }
+
+    /** Exposed for callbacks and reconciliation; a real system would not hand out the ledger. */
+    LedgerService ledger() {
+        return ledger;
+    }
+}
