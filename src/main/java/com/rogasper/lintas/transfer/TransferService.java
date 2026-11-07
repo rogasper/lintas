@@ -1,7 +1,11 @@
 package com.rogasper.lintas.transfer;
 
+import com.rogasper.lintas.ledger.EntryDirection;
 import com.rogasper.lintas.ledger.LedgerService;
+import com.rogasper.lintas.ledger.Posting;
 import com.rogasper.lintas.partner.PartnerClient;
+import com.rogasper.lintas.partner.PartnerRequest;
+import com.rogasper.lintas.partner.PartnerResult;
 import com.rogasper.lintas.shared.Currency;
 import com.rogasper.lintas.shared.Money;
 import org.springframework.stereotype.Service;
@@ -11,6 +15,7 @@ import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -102,8 +107,49 @@ public class TransferService {
      * </ol>
      */
     public Transfer execute(String idempotencyKey, String quoteId) {
-        throw new UnsupportedOperationException(
-                "TODO drill 5-10: implement TransferService.execute (idempotency, expiry, partner call, refund)");
+        Optional<Transfer> existing = transfers.findByIdempotencyKey(idempotencyKey);
+        if(existing.isPresent()){
+            return existing.get();
+        }
+
+        Quote quote = quotes.findById(quoteId)
+            .orElseThrow(() -> new IllegalArgumentException("Unknown quote: " + quoteId));
+
+        if (quote.isExpired(clock.instant())){
+            throw new QuoteExpiredException(quote.id());
+        }
+
+        String transferId = "TRF-" + UUID.randomUUID().toString().substring(0,8);
+        Transfer transfer = Transfer.pending(
+            transferId,
+            quote.id(),
+            idempotencyKey,
+            quote.sourceAmount(),
+            quote.targetAmount(),
+            clock.instant()
+        );
+        transfers.save(transfer);
+
+        String customerAccountId = "ACC-" + quote.customerRef();
+        String partnerAccountId = "ACC-PART-1";
+        ledger.post("TX-" + transferId, List.of(
+            new Posting(customerAccountId, EntryDirection.DEBIT, quote.sourceAmount()),
+            new Posting(partnerAccountId, EntryDirection.CREDIT, quote.sourceAmount())
+        ));
+
+        PartnerResult result = partner.submit(new PartnerRequest(
+            transfer.id(),
+            transfer.sourceAmount(),
+            transfer.targetAmount(),
+            quote.customerRef()
+        ));
+
+        if (result.accepted()) {
+            transfer = transfer.withStatus(TransferStatus.ACCEPTED)
+                .withPartnerRef(result.partnerRef());
+            return  transfers.save(transfer);
+        }
+        return transfer;
     }
 
     /** Cancels a transfer that has not reached the partner yet. */
