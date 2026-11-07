@@ -2,7 +2,10 @@ package com.rogasper.lintas.ledger;
 
 import com.rogasper.lintas.shared.Money;
 import org.springframework.stereotype.Service;
+import com.rogasper.lintas.shared.Currency;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -35,14 +38,67 @@ public class LedgerService {
      *                                  unknown account
      */
     public List<Entry> post(String transactionRef, List<Posting> postings) {
-        throw new UnsupportedOperationException(
-                "TODO drill 1-4: implement LedgerService.post (balance check, currency check, idempotency)");
+        if(entries.hasTransaction(transactionRef)){
+            return entries.findByTransaction(transactionRef);
+        }
+        if(postings == null || postings.isEmpty()){
+            throw new IllegalArgumentException("Postings cannot be empty");
+        }
+
+        Currency txCurrency = null;
+        long creditSum = 0L;
+        long debitSum = 0L;
+
+        for (Posting posting : postings){
+            Account account = accounts.findById(posting.accountId())
+                .orElseThrow(() -> new IllegalArgumentException("Unknown account: " + posting.accountId()));
+
+            Currency postingCurrency = posting.amount().currency();
+
+            if (account.currency() != postingCurrency) {
+                throw new IllegalArgumentException("Currency mismatch for account %s: expected %s but got %s".formatted(account.id(), account.currency(), postingCurrency));
+            }
+
+            if(txCurrency == null){
+                txCurrency = postingCurrency;
+            } else if (txCurrency != postingCurrency) {
+                throw new IllegalArgumentException("Mixed currency in transaction: %s vs %s".formatted(txCurrency, postingCurrency));
+            }
+
+            if (posting.direction() == EntryDirection.CREDIT) {
+                creditSum += posting.amount().minorUnits();
+            } else if (posting.direction() == EntryDirection.DEBIT) {
+                debitSum += posting.amount().minorUnits();
+            }
+        }
+
+        if (creditSum != debitSum) {
+            throw new IllegalArgumentException("Unbalanced posting: credit=" + creditSum + ", debit=" + debitSum);
+        }
+
+        Instant recordedAt = Instant.now();
+        List<Entry> recorded = new ArrayList<>();
+        for (Posting posting : postings) {
+            recorded.add(entries.append(transactionRef, posting, recordedAt));
+        }
+        return recorded;
     }
 
     /** Credits minus debits for the account, in the account's currency. */
     public Money balanceOf(String accountId) {
-        throw new UnsupportedOperationException(
-                "TODO drill 1: implement LedgerService.balanceOf from the journal, never from a cached field");
+        Account account = accounts.findById(accountId)
+            .orElseThrow(() -> new IllegalArgumentException("Unknown account: " + accountId));
+
+        Money balance = Money.zero(account.currency());
+        for (Entry entry : entries.findByAccount(accountId)){
+            if(entry.direction() == EntryDirection.CREDIT){
+                balance = balance.plus(entry.posting().amount());
+            } else if(entry.direction() == EntryDirection.DEBIT){
+                balance = balance.minus(entry.posting().amount());
+            }
+        }
+
+        return balance;
     }
 
     public List<Entry> entriesOf(String accountId) {
