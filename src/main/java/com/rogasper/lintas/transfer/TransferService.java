@@ -109,7 +109,13 @@ public class TransferService {
     public Transfer execute(String idempotencyKey, String quoteId) {
         Optional<Transfer> existing = transfers.findByIdempotencyKey(idempotencyKey);
         if(existing.isPresent()){
-            return existing.get();
+            Transfer transfer = existing.get();
+            if (transfer.status() == TransferStatus.PENDING_PARTNER) {
+                Quote quote = quotes.findById(transfer.quoteId())
+                    .orElseThrow(() -> new IllegalArgumentException("Unknown quote: " + transfer.quoteId()));
+                return sendToPartner(transfer, quote.customerRef(), quote.sourceAmount());
+            }
+            return transfer;
         }
 
         Quote quote = quotes.findById(quoteId)
@@ -137,19 +143,7 @@ public class TransferService {
             new Posting(partnerAccountId, EntryDirection.CREDIT, quote.sourceAmount())
         ));
 
-        PartnerResult result = partner.submit(new PartnerRequest(
-            transfer.id(),
-            transfer.sourceAmount(),
-            transfer.targetAmount(),
-            quote.customerRef()
-        ));
-
-        if (result.accepted()) {
-            transfer = transfer.withStatus(TransferStatus.ACCEPTED)
-                .withPartnerRef(result.partnerRef());
-            return  transfers.save(transfer);
-        }
-        return transfer;
+        return sendToPartner(transfer, quote.customerRef(), quote.sourceAmount());
     }
 
     /** Cancels a transfer that has not reached the partner yet. */
@@ -165,5 +159,30 @@ public class TransferService {
     /** Exposed for callbacks and reconciliation; a real system would not hand out the ledger. */
     LedgerService ledger() {
         return ledger;
+    }
+
+    private Transfer sendToPartner(Transfer transfer, String customerRef, Money sourceAmount){
+        PartnerResult result = partner.submit(new PartnerRequest(
+            transfer.id(),
+            transfer.sourceAmount(),
+            transfer.targetAmount(),
+            customerRef
+        ));
+
+        if (result.timedOut()) {
+            transfer = transfer.withStatus(TransferStatus.ACCEPTED)
+                .withPartnerRef(result.partnerRef());
+            return transfers.save(transfer);
+        }
+
+        String customerAccountId = "ACC-" + customerRef;
+        String partnerAccountId = "ACC-PART-1";
+        ledger.post("TX-REFUND-"+ transfer.id(), List.of(
+            new Posting(customerAccountId, EntryDirection.CREDIT, sourceAmount),
+            new Posting(partnerAccountId, EntryDirection.DEBIT, sourceAmount)
+        ));
+
+        transfer = transfer.withStatus(TransferStatus.REFUNDED);
+        return transfers.save(transfer);
     }
 }
