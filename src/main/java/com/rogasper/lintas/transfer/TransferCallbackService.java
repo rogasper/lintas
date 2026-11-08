@@ -32,7 +32,32 @@ public class TransferCallbackService {
     }
 
     public Transfer handle(PartnerCallback callback) {
-        throw new UnsupportedOperationException(
-                "TODO drill 7-8: implement TransferCallbackService.handle (dedupe + out-of-order + no double posting)");
+        Transfer transfer = transfers.findById(callback.transferId())
+            .orElseThrow(() -> new IllegalArgumentException("Unknown transfer: " + callback.transferId()));
+
+        if(callback.sequence() <= transfer.lastPartnerSequence()){
+            return transfer;
+        }
+
+        TransferStatus targetStatus = switch (callback.status()) {
+            case ACCEPTED -> TransferStatus.ACCEPTED;
+            case PAID -> TransferStatus.PAID;
+            case FAILED -> TransferStatus.FAILED;
+            case PENDING -> transfer.status();
+        };
+
+        if (transfer.status() == TransferStatus.PAID && targetStatus == TransferStatus.ACCEPTED) {
+            return transfer.withLastPartnerSequence(callback.sequence());
+        }
+
+        Transfer updated = transfer
+            .withStatus(targetStatus)
+            .withLastPartnerSequence(callback.sequence());
+
+        if (updated.partnerRef() == null && callback.partnerRef() != null) {
+            updated = updated.withPartnerRef(callback.partnerRef());
+        }
+
+        return transfers.save(updated);
     }
 }
