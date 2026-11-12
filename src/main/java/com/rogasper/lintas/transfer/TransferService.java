@@ -106,7 +106,7 @@ public class TransferService {
      *       balance back to where it started.</li>
      * </ol>
      */
-    public Transfer execute(String idempotencyKey, String quoteId) {
+    public synchronized Transfer execute(String idempotencyKey, String quoteId) {
         Optional<Transfer> existing = transfers.findByIdempotencyKey(idempotencyKey);
         if(existing.isPresent()){
             Transfer transfer = existing.get();
@@ -136,11 +136,9 @@ public class TransferService {
         );
         transfers.save(transfer);
 
-        String customerAccountId = "ACC-" + quote.customerRef();
-        String partnerAccountId = "ACC-PART-1";
         ledger.post("TX-" + transferId, List.of(
-            new Posting(customerAccountId, EntryDirection.DEBIT, quote.sourceAmount()),
-            new Posting(partnerAccountId, EntryDirection.CREDIT, quote.sourceAmount())
+            new Posting(customerAccountId(quote), EntryDirection.DEBIT, quote.sourceAmount()),
+            new Posting(partnerAccountId(), EntryDirection.CREDIT, quote.sourceAmount())
         ));
 
         return sendToPartner(transfer, quote.customerRef(), quote.sourceAmount());
@@ -162,6 +160,7 @@ public class TransferService {
     }
 
     private Transfer sendToPartner(Transfer transfer, String customerRef, Money sourceAmount){
+        Transfer attempt = transfers.save(transfer.withAttempts(transfer.attempts() + 1));
         PartnerResult result = partner.submit(new PartnerRequest(
             transfer.id(),
             transfer.sourceAmount(),
@@ -170,19 +169,33 @@ public class TransferService {
         ));
 
         if (result.timedOut()) {
-            transfer = transfer.withStatus(TransferStatus.ACCEPTED)
-                .withPartnerRef(result.partnerRef());
-            return transfers.save(transfer);
+            throw new PartnerTimeoutException(attempt.id());
         }
 
-        String customerAccountId = "ACC-" + customerRef;
-        String partnerAccountId = "ACC-PART-1";
+        if(result.accepted()){
+            return transfers.save(attempt
+                                 .withStatus(TransferStatus.ACCEPTED)
+                                 .withPartnerRef(result.partnerRef()));
+        }
+
         ledger.post("TX-REFUND-"+ transfer.id(), List.of(
-            new Posting(customerAccountId, EntryDirection.CREDIT, sourceAmount),
-            new Posting(partnerAccountId, EntryDirection.DEBIT, sourceAmount)
+            new Posting(customerAccountId(customerRef), EntryDirection.CREDIT, sourceAmount),
+            new Posting(partnerAccountId(), EntryDirection.DEBIT, sourceAmount)
         ));
 
         transfer = transfer.withStatus(TransferStatus.REFUNDED);
         return transfers.save(transfer);
+    }
+
+    private static String customerAccountId(Quote quote){
+        return customerAccountId(quote.customerRef());
+    }
+
+    private static String customerAccountId(String customerRef){
+        return "ACC-" + customerRef;
+    }
+
+    private static String partnerAccountId(){
+        return "ACC-PART-1";
     }
 }
