@@ -1,9 +1,19 @@
 package com.rogasper.lintas.recon;
 
+import com.rogasper.lintas.partner.PartnerStatus;
+import com.rogasper.lintas.transfer.Transfer;
 import com.rogasper.lintas.transfer.TransferRepository;
+import com.rogasper.lintas.transfer.TransferStatus;
+
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Compares our side with the partner statement. Reconciliation is not reporting: it is the control
@@ -24,7 +34,55 @@ public class ReconService {
      * @return every difference, or a clean result
      */
     public ReconResult reconcile(List<PartnerStatementLine> statement) {
-        throw new UnsupportedOperationException(
-                "TODO drill 11: implement ReconService.reconcile (missing on either side + amount mismatch)");
+        Map<String, Transfer> oursById = new TreeMap<>();
+        for (Transfer transfer : transfers.findAll()) {
+            oursById.put(transfer.id(), transfer);
+        }
+
+        Set<String> onlyInLedger = new TreeSet<>();
+        Set<String> onlyAtPartner  = new TreeSet<>();
+        Set<String> amountMismatch = new TreeSet<>();
+        Set<String> statusMismatch = new TreeSet<>();
+        Set<String> matchedIds = new HashSet<>();
+
+        for (PartnerStatementLine line : statement) {
+            Transfer ours = oursById.get(line.transferId());
+
+            if (ours == null) {
+                onlyAtPartner.add(line.partnerRef());
+                continue;
+            }
+
+            matchedIds.add(ours.id());
+
+            if (!ours.targetAmount().equals(line.amount())) {
+                amountMismatch.add(ours.id());
+            }
+            if (ours.status() != toTransferStatus(line.status())) {
+                statusMismatch.add(ours.id());
+            }
+        }
+
+        for (Transfer transfer : oursById.values()) {
+            if (!matchedIds.contains(transfer.id())) {
+                onlyInLedger.add(transfer.id());
+            }
+        }
+
+        return new ReconResult(
+            new ArrayList<>(onlyInLedger),
+            new ArrayList<>(onlyAtPartner),
+            new ArrayList<>(amountMismatch),
+            new ArrayList<>(statusMismatch)
+        );
+    }
+
+    private static TransferStatus toTransferStatus(PartnerStatus status){
+        return switch(status){
+            case PENDING -> TransferStatus.PENDING_PARTNER;
+            case ACCEPTED -> TransferStatus.ACCEPTED;
+            case PAID -> TransferStatus.PAID;
+            case FAILED -> TransferStatus.FAILED;
+        };
     }
 }
